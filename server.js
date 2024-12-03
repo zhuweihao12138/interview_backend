@@ -33,6 +33,7 @@ const db = new sqlite3.Database("./users.db", (err) => {
           user_id INTEGER NOT NULL,
           title TEXT NOT NULL,
           date TEXT NOT NULL,
+          assigned_user TEXT,
           FOREIGN KEY(user_id) REFERENCES users(id)
         )`);
 
@@ -128,18 +129,22 @@ app.get("/api/appointments", authenticateToken, (req, res) => {
   const userId = req.user.id;
 
   db.all(
-    `SELECT * FROM appointments WHERE user_id = ?`,
-    [userId],
+    `SELECT *, (user_id = ?) AS canCancel FROM appointments WHERE user_id = ? OR assigned_user = ?`,
+    [userId, userId, req.user.username],
     (err, rows) => {
       if (err) return res.status(500).json({ message: "获取预约失败。" });
-      res.status(200).json(rows);
+      res.status(200).json(rows.map(row => ({
+        ...row,
+        canCancel: Boolean(row.canCancel), // 转换为布尔值
+      })));
     }
   );
 });
 
+
 // 添加预约接口
 app.post("/api/appointments", authenticateToken, (req, res) => {
-  const { title, date } = req.body;
+  const { title, date, assignedUser } = req.body;
   const userId = req.user.id;
 
   if (!title || !date) {
@@ -147,14 +152,14 @@ app.post("/api/appointments", authenticateToken, (req, res) => {
   }
 
   db.run(
-    `INSERT INTO appointments (user_id, title, date) VALUES (?, ?, ?)`,
-    [userId, title, date],
+    `INSERT INTO appointments (user_id, title, date, assigned_user) VALUES (?, ?, ?, ?)`,
+    [userId, title, date, assignedUser],
     function (err) {
       if (err) return res.status(500).json({ message: "添加预约失败。" });
 
       db.run(
         `INSERT INTO logs (user_id, message, timestamp) VALUES (?, ?, ?)`,
-        [userId, `添加预约: ${title}`, Date.now()],
+        [userId, `添加预约: ${title}, 指定用户: ${assignedUser || "无"}`, Date.now()],
         (logErr) => {
           if (logErr) console.error("记录日志失败:", logErr.message);
         }
@@ -165,29 +170,39 @@ app.post("/api/appointments", authenticateToken, (req, res) => {
   );
 });
 
-// 删除预约接口
 app.delete("/api/appointments/:id", authenticateToken, (req, res) => {
   const appointmentId = req.params.id;
   const userId = req.user.id;
 
-  db.run(
-    `DELETE FROM appointments WHERE id = ? AND user_id = ?`,
-    [appointmentId, userId],
-    function (err) {
-      if (err) return res.status(500).json({ message: "删除预约失败。" });
+  db.get(
+    `SELECT * FROM appointments WHERE id = ?`,
+    [appointmentId],
+    (err, appointment) => {
+      if (err || !appointment) return res.status(404).json({ message: "预约不存在。" });
+      if (appointment.user_id !== userId)
+        return res.status(403).json({ message: "无权删除此预约。" });
 
       db.run(
-        `INSERT INTO logs (user_id, message, timestamp) VALUES (?, ?, ?)`,
-        [userId, `删除预约 ID: ${appointmentId}`, Date.now()],
-        (logErr) => {
-          if (logErr) console.error("记录日志失败:", logErr.message);
+        `DELETE FROM appointments WHERE id = ?`,
+        [appointmentId],
+        function (err) {
+          if (err) return res.status(500).json({ message: "删除预约失败。" });
+
+          db.run(
+            `INSERT INTO logs (user_id, message, timestamp) VALUES (?, ?, ?)`,
+            [userId, `删除预约 ID: ${appointmentId}, 指定用户: ${appointment.assigned_user || "无"}`, Date.now()],
+            (logErr) => {
+              if (logErr) console.error("记录日志失败:", logErr.message);
+            }
+          );
+
+          res.status(200).json({ message: "预约已删除。" });
         }
       );
-
-      res.status(200).json({ message: "预约已删除。" });
     }
   );
 });
+
 
 // 获取日志接口
 app.get("/api/logs", authenticateToken, (req, res) => {
